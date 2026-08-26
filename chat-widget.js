@@ -2,9 +2,12 @@
   const script = document.currentScript;
   const API_URL = (script && script.dataset && script.dataset.apiUrl) || "http://localhost:8000/chat";
   const HEALTH_URL = API_URL.replace(/\/chat\/?$/, "/health");
-  const FETCH_TIMEOUT_MS = 120000;
+  const HEALTH_TIMEOUT_MS = 15000;
+  const CHAT_TIMEOUT_MS = 120000;
+  const POLL_INTERVAL_MS = 3000;
+  const MAX_HEALTH_ATTEMPTS = 30;
 
-  let backendAwake = false;
+  let backendReadyPromise = null;
 
   const css = `
     #chat-widget-button {
@@ -68,6 +71,7 @@
       padding: 12px;
       display: flex;
       flex-direction: column;
+      color: #111;
     }
     .chat-message {
       margin-bottom: 10px;
@@ -76,6 +80,7 @@
       border-radius: 12px;
       max-width: 85%;
       word-wrap: break-word;
+      color: #111;
     }
     .chat-message.user {
       background: #e3f2fd;
@@ -96,7 +101,9 @@
       border: 1px solid #ddd;
       border-radius: 4px;
       font-size: 14px;
+      color: #111;
     }
+    .chat-input input::placeholder { color: #888; }
     .chat-input input:disabled,
     .chat-input button:disabled {
       opacity: 0.6;
@@ -112,8 +119,6 @@
       cursor: pointer;
       font-size: 14px;
     }
-    .chat-messages, .chat-message, .chat-input input { color: #111; }
-    .chat-input input::placeholder { color: #888; }
   `;
 
   const styleEl = document.createElement("style");
@@ -158,8 +163,8 @@
   function togglePanel() {
     const isOpen = panel.style.display === "flex";
     panel.style.display = isOpen ? "none" : "flex";
-    if (!isOpen && !backendAwake) {
-      wakeUpBackend();
+    if (!isOpen) {
+      ensureAwake();
     }
   }
 
@@ -171,9 +176,9 @@
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
-  async function fetchWithTimeout(url, options) {
+  async function fetchWithTimeout(url, options, timeoutMs) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(url, Object.assign({ signal: controller.signal }, options));
       return res;
@@ -182,27 +187,53 @@
     }
   }
 
-  async function wakeUpBackend() {
-    setStatus("Waking up backend... (can take up to 60s)");
+  function ensureAwake() {
+    if (backendReadyPromise) return backendReadyPromise;
+    setStatus("Waking up backend...");
     inputEl.disabled = true;
     sendBtn.disabled = true;
-    try {
-      const res = await fetchWithTimeout(HEALTH_URL, { method: "GET" });
-      if (!res.ok) throw new Error("Server error");
-      backendAwake = true;
-      setStatus("");
-    } catch (err) {
-      setStatus("Backend is still waking up. Try sending a message in a few seconds.");
-    } finally {
-      inputEl.disabled = false;
-      sendBtn.disabled = false;
-      inputEl.focus();
-    }
+
+    backendReadyPromise = (async () => {
+      for (let attempt = 1; attempt <= MAX_HEALTH_ATTEMPTS; attempt++) {
+        try {
+          const res = await fetchWithTimeout(HEALTH_URL, { method: "GET" }, HEALTH_TIMEOUT_MS);
+          if (res.ok) return true;
+        } catch (e) {}
+        setStatus("Waking up backend... (attempt " + attempt + "/" + MAX_HEALTH_ATTEMPTS + ")");
+        if (attempt < MAX_HEALTH_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+        }
+      }
+      throw new Error("Backend did not wake up in time");
+    })();
+
+    backendReadyPromise
+      .then(() => {
+        setStatus("");
+      })
+      .catch((err) => {
+        setStatus("Backend could not wake up. Please try again later.");
+      })
+      .finally(() => {
+        inputEl.disabled = false;
+        sendBtn.disabled = false;
+        inputEl.focus();
+      });
+
+    return backendReadyPromise;
   }
 
   async function sendMessage() {
     const question = inputEl.value.trim();
     if (!question) return;
+
+    try {
+      await ensureAwake();
+    } catch (err) {
+      appendMessage("Backend is not ready yet. Please wait and try again.", "agent");
+      return;
+    }
+
     inputEl.value = "";
     appendMessage(question, "user");
 
@@ -210,29 +241,22 @@
     inputEl.disabled = true;
     sendBtn.disabled = true;
 
-    const attempt = async () => {
-      const res = await fetchWithTimeout(API_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question }),
-      });
+    try {
+      const res = await fetchWithTimeout(
+        API_URL,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question }),
+        },
+        CHAT_TIMEOUT_MS
+      );
       if (!res.ok) throw new Error("Server error " + res.status);
       const data = await res.json();
       appendMessage(data.answer || "No answer", "agent");
-    };
-
-    try {
-      await attempt();
     } catch (err) {
-      setStatus("Retrying...");
-      await new Promise((resolve) => setTimeout(resolve, 3000));
-      try {
-        await attempt();
-      } catch (err2) {
-        appendMessage("Sorry, I could not reach the assistant. The backend may still be waking up. Wait a few seconds and try again.", "agent");
-      }
+      appendMessage("Sorry, I could not reach the assistant. The backend may still be waking up. Wait a few seconds and try again.", "agent");
     } finally {
-      setStatus("");
       inputEl.disabled = false;
       sendBtn.disabled = false;
       inputEl.focus();
