@@ -1,6 +1,10 @@
 (function () {
   const script = document.currentScript;
   const API_URL = (script && script.dataset && script.dataset.apiUrl) || "http://localhost:8000/chat";
+  const HEALTH_URL = API_URL.replace(/\/chat\/?$/, "/health");
+  const FETCH_TIMEOUT_MS = 120000;
+
+  let backendAwake = false;
 
   const css = `
     #chat-widget-button {
@@ -46,6 +50,15 @@
       align-items: center;
       font-weight: bold;
     }
+    .chat-status {
+      padding: 6px 12px;
+      font-size: 12px;
+      color: #555;
+      background: #f9f9f9;
+      border-bottom: 1px solid #ddd;
+      text-align: center;
+      display: none;
+    }
     .chat-close {
       cursor: pointer;
     }
@@ -84,6 +97,11 @@
       border-radius: 4px;
       font-size: 14px;
     }
+    .chat-input input:disabled,
+    .chat-input button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
     .chat-input button {
       margin-left: 8px;
       padding: 10px 16px;
@@ -108,6 +126,7 @@
         <span>Portfolio Assistant</span>
         <span class="chat-close">X</span>
       </div>
+      <div class="chat-status" id="chat-status"></div>
       <div class="chat-messages" id="chat-messages"></div>
       <div class="chat-input">
         <input type="text" id="chat-input" placeholder="Ask a question..." autocomplete="off">
@@ -123,9 +142,23 @@
   const messagesEl = document.getElementById("chat-messages");
   const inputEl = document.getElementById("chat-input");
   const sendBtn = document.getElementById("chat-send");
+  const statusEl = document.getElementById("chat-status");
+
+  function setStatus(text) {
+    if (!text) {
+      statusEl.style.display = "none";
+      return;
+    }
+    statusEl.textContent = text;
+    statusEl.style.display = "block";
+  }
 
   function togglePanel() {
-    panel.style.display = panel.style.display === "flex" ? "none" : "flex";
+    const isOpen = panel.style.display === "flex";
+    panel.style.display = isOpen ? "none" : "flex";
+    if (!isOpen && !backendAwake) {
+      wakeUpBackend();
+    }
   }
 
   function appendMessage(text, sender) {
@@ -136,25 +169,69 @@
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
+  async function fetchWithTimeout(url, options) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, Object.assign({ signal: controller.signal }, options));
+      return res;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
+
+  async function wakeUpBackend() {
+    setStatus("Waking up backend... (can take up to 60s)");
+    inputEl.disabled = true;
+    sendBtn.disabled = true;
+    try {
+      const res = await fetchWithTimeout(HEALTH_URL, { method: "GET" });
+      if (!res.ok) throw new Error("Server error");
+      backendAwake = true;
+      setStatus("");
+    } catch (err) {
+      setStatus("Backend is still waking up. Try sending a message in a few seconds.");
+    } finally {
+      inputEl.disabled = false;
+      sendBtn.disabled = false;
+      inputEl.focus();
+    }
+  }
+
   async function sendMessage() {
     const question = inputEl.value.trim();
     if (!question) return;
     inputEl.value = "";
     appendMessage(question, "user");
 
+    setStatus("");
+    inputEl.disabled = true;
     sendBtn.disabled = true;
-    try {
-      const res = await fetch(API_URL, {
+
+    const attempt = async () => {
+      const res = await fetchWithTimeout(API_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ question }),
       });
-      if (!res.ok) throw new Error("Server error");
+      if (!res.ok) throw new Error("Server error " + res.status);
       const data = await res.json();
       appendMessage(data.answer || "No answer", "agent");
+    };
+
+    try {
+      await attempt();
     } catch (err) {
-      appendMessage("Sorry, I could not reach the assistant. (" + err.message + ")", "agent");
+      setStatus("Retrying...");
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      try {
+        await attempt();
+      } catch (err2) {
+        appendMessage("Sorry, I could not reach the assistant. The backend may still be waking up. Wait a few seconds and try again.", "agent");
+      }
     } finally {
+      setStatus("");
+      inputEl.disabled = false;
       sendBtn.disabled = false;
       inputEl.focus();
     }
