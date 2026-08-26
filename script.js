@@ -69,5 +69,5 @@ style.textContent = `
 document.head.appendChild(style);
 
 // Console message
-console.log('%c👋 Hi there! Thanks for checking out my portfolio.', 'color: #6366f1; font-size: 14px;');
-console.log('%c📧 Feel free to reach out: jsurya24082000@gmail.com', 'color: #94a3b8;');
+console.log('%cHi there! Thanks for checking out my portfolio.', 'color: #6366f1; font-size: 14px;');
+console.log('%cFeel free to reach out: jsurya24082000@gmail.com', 'color: #94a3b8;');
