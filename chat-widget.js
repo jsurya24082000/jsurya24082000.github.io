@@ -112,6 +112,8 @@
       cursor: pointer;
       font-size: 14px;
     }
+    .chat-messages, .chat-message, .chat-input input { color: #111; }
+    .chat-input input::placeholder { color: #888; }
   `;
 
   const styleEl = document.createElement("style");
